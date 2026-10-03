@@ -1,0 +1,77 @@
+name: build
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. v1.0.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate version input
+        shell: bash
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          if ! [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::version must match vX.Y.Z, got: $VERSION"
+            exit 1
+          fi
+
+      - name: Setup MinGW
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: mingw-w64-x86_64-gcc
+        id: msys2
+
+      - name: Build
+        shell: msys2 {0}
+        run: |
+          g++ -shared -O2 -s -I "minhook/include" \
+            "src/douyin_lite.cpp" \
+            "minhook/src/buffer.c" \
+            "minhook/src/hook.c" \
+            "minhook/src/trampoline.c" \
+            "minhook/src/hde/hde64.c" \
+            "minhook/src/hde/hde32.c" \
+            -o "bin/douyin_lite.dll" \
+            -lpsapi -lshlwapi -static
+          g++ -mwindows -O2 -s -municode \
+            "src/launcher.cpp" \
+            -o "bin/douyin_lite.exe" \
+            -lshlwapi -lshell32 -static
+
+      - name: Prepare artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "release/douyin_lite" | Out-Null
+          Copy-Item "bin/douyin_lite.dll" "release/douyin_lite/"
+          Copy-Item "bin/douyin_lite.exe" "release/douyin_lite/"
+          Copy-Item "douyin_lite.ini" "release/douyin_lite/"
+          Copy-Item "USAGE.txt" "release/douyin_lite/"
+          Copy-Item "LICENSE" "release/douyin_lite/"
+          Compress-Archive -Path "release/douyin_lite" -DestinationPath "douyin_lite-${{ github.event.inputs.version }}.zip" -Force
+
+      - name: Create tag
+        shell: bash
+        run: |
+          git tag "${{ github.event.inputs.version }}"
+          git push origin "${{ github.event.inputs.version }}"
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.version }}
+          files: douyin_lite-*.zip
+          generate_release_notes: true

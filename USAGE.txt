@@ -1,0 +1,56 @@
+douyin_lite 使用说明
+====================
+
+简介
+----
+抖音 PC 客户端低内存运行器。通过进程注入与 API Hook，将刷视频时 1.5GB+ 的内存占用
+稳定控制在 450MB 以内。不修改抖音安装目录的任何文件。
+
+文件说明
+--------
+douyin_lite.dll    核心 Hook 模块（必须）
+douyin_lite.exe    启动注入器（必须）
+douyin_lite.ini    内存参数配置（可选，删除后首次运行会自动生成默认配置）
+LICENSE            开源协议
+
+使用方法
+--------
+方式一：将 douyin_lite.dll 与 douyin_lite.exe 复制到抖音安装目录
+（与 douyin.exe 同级），双击 douyin_lite.exe。
+
+方式二：放到任意目录，通过命令行参数指定抖音路径：
+
+    douyin_lite.exe --exe "D:\Program Files (x86)\ByteDance\douyin\douyin.exe"
+
+命令行参数
+----------
+--exe <路径>    目标程序路径，缺省为当前目录下的 douyin.exe
+--dll <路径>    注入模块路径，缺省为当前目录下的 douyin_lite.dll
+--help          显示用法
+
+抖音已在运行时再次启动 douyin_lite.exe，会将现有主窗口唤起到前台，不会重复注入。
+
+配置项（douyin_lite.ini）
+-------------------------
+[mem]
+v8_heap_mb=512          V8 JS 堆上限（MB）
+total_threshold_mb=450  进程树总物理内存熔断阈值（MB）
+single_threshold_mb=250 单进程物理内存熔断阈值（MB）
+cooldown_sec=6          两次修剪的最小冷却间隔（秒）
+full_trim_sec=12        保底修剪周期（秒）
+
+修改后重启抖音生效。数值越界或不合法时自动回落内置默认值。
+
+已知代价
+--------
+- 向回翻看历史视频时缓存已被释放，需重新加载。
+- 窗口失焦一段时间后切回可能出现一次极短的顿挫（软缺页）。
+
+卸载
+----
+直接删除 douyin_lite.dll、douyin_lite.exe、douyin_lite.ini 即可，
+抖音恢复原版行为。
+
+协议
+----
+MIT（详见 LICENSE）
