@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Release version (e.g. v1.0.0)'
+        description: 'Release version (e.g. 1.0.0)'
         required: true
 
 permissions:
@@ -22,10 +22,11 @@ jobs:
         shell: bash
         run: |
           VERSION="${{ github.event.inputs.version }}"
-          if ! [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::version must match vX.Y.Z, got: $VERSION"
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::version must be numeric X.Y.Z (e.g. 1.0.0), got: $VERSION"
             exit 1
           fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
 
       - name: Setup MinGW
         uses: msys2/setup-msys2@v2
@@ -38,6 +39,7 @@ jobs:
       - name: Build
         shell: msys2 {0}
         run: |
+          mkdir -p bin
           g++ -shared -O2 -s -I "minhook/include" \
             "src/douyin_lite.cpp" \
             "minhook/src/buffer.c" \
@@ -61,17 +63,17 @@ jobs:
           Copy-Item "douyin_lite.ini" "release/douyin_lite/"
           Copy-Item "USAGE.txt" "release/douyin_lite/"
           Copy-Item "LICENSE" "release/douyin_lite/"
-          Compress-Archive -Path "release/douyin_lite" -DestinationPath "douyin_lite-${{ github.event.inputs.version }}.zip" -Force
+          Compress-Archive -Path "release/douyin_lite" -DestinationPath "douyin_lite-v$env:VERSION.zip" -Force
 
       - name: Create tag
         shell: bash
         run: |
-          git tag "${{ github.event.inputs.version }}"
-          git push origin "${{ github.event.inputs.version }}"
+          git tag "v${VERSION}"
+          git push origin "v${VERSION}"
 
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.version }}
+          tag_name: v${{ env.VERSION }}
           files: douyin_lite-*.zip
           generate_release_notes: true
