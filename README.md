@@ -19,7 +19,7 @@
 同目录没有 `douyin.exe` 时通过参数指定：
 
 ```cmd
-douyin_lite.exe --exe "D:\Program Files (x86)\ByteDance\douyin\douyin.exe"
+douyin_lite.exe --exe "C:\Program Files (x86)\ByteDance\douyin\douyin.exe"
 ```
 
 - `--exe <路径>`：目标程序路径，缺省为当前目录下的 `douyin.exe`
