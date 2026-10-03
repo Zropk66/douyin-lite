@@ -34,10 +34,11 @@ static wchar_t g_szDllPath[MAX_PATH] = {0};
 
 struct Config {
     DWORD v8HeapMb = 512;
-    SIZE_T totalThresholdMb = 450;
-    SIZE_T singleThresholdMb = 250;
+    DWORD rendererLimit = 4;
+    SIZE_T totalThresholdMb = 900;
+    SIZE_T singleThresholdMb = 400;
+    SIZE_T trimTargetMb = 300;
     DWORD cooldownSec = 6;
-    DWORD fullTrimSec = 12;
 };
 
 static Config g_cfg;
@@ -58,10 +59,11 @@ static std::wstring GetConfigPath() {
 static const char* g_defaultIni =
     "[mem]\n"
     "v8_heap_mb=512\n"
-    "total_threshold_mb=450\n"
-    "single_threshold_mb=250\n"
-    "cooldown_sec=6\n"
-    "full_trim_sec=12\n";
+    "renderer_limit=4\n"
+    "total_threshold_mb=900\n"
+    "single_threshold_mb=400\n"
+    "trim_target_mb=300\n"
+    "cooldown_sec=6\n";
 
 static void EnsureConfigFile() {
     std::wstring path = GetConfigPath();
@@ -99,17 +101,20 @@ static void LoadConfig() {
     if (ReadIniUint(iniPath, L"v8_heap_mb", 64, 4096, &v)) {
         g_cfg.v8HeapMb = (DWORD)v;
     }
+    if (ReadIniUint(iniPath, L"renderer_limit", 1, 8, &v)) {
+        g_cfg.rendererLimit = (DWORD)v;
+    }
     if (ReadIniUint(iniPath, L"total_threshold_mb", 128, 8192, &v)) {
         g_cfg.totalThresholdMb = (SIZE_T)v;
     }
     if (ReadIniUint(iniPath, L"single_threshold_mb", 64, 4096, &v)) {
         g_cfg.singleThresholdMb = (SIZE_T)v;
     }
+    if (ReadIniUint(iniPath, L"trim_target_mb", 0, 4096, &v)) {
+        g_cfg.trimTargetMb = (SIZE_T)v;
+    }
     if (ReadIniUint(iniPath, L"cooldown_sec", 1, 120, &v)) {
         g_cfg.cooldownSec = (DWORD)v;
-    }
-    if (ReadIniUint(iniPath, L"full_trim_sec", 2, 600, &v)) {
-        g_cfg.fullTrimSec = (DWORD)v;
     }
 }
 
@@ -121,22 +126,27 @@ static std::wstring FormatMb(unsigned long mb) {
 
 static const wchar_t* g_mediaCacheFlags =
     L" --disk-cache-size=16777216"
-    L" --media-cache-size=16777216"
-    L" --enable-zero-copy";
+    L" --media-cache-size=16777216";
 
 static std::wstring g_extraMainFlags;
 
+// 渲染进程堆实测上限 256 时仅用 160MB；主进程不解析 --js-flags 的 V8 段，靠 GetCommandLineW hook 覆盖
+// --optimize_for_size 放弃：V8 12+ 无此 flag，写入会被忽略
 static void BuildMainFlags() {
     g_extraMainFlags =
-        L" --js-flags=\"--max-old-space-size=" + FormatMb(g_cfg.v8HeapMb) + L" --optimize_for_size\""
-        L" --disable-background-networking" + std::wstring(g_mediaCacheFlags);
+        L" --js-flags=\"--max-old-space-size=" + FormatMb(g_cfg.v8HeapMb) + L"\""
+        L" --disable-background-networking --disable-component-update --disable-breakpad"
+        L" --renderer-process-limit=" + FormatMb(g_cfg.rendererLimit) +
+        L" --process-per-site-instance" + std::wstring(g_mediaCacheFlags);
 }
 
 static const std::vector<std::wstring> g_blockedProcesses = {
     L"tt_crash_reporter.exe",
     L"dump_reporter.exe",
     L"douyin_doctor.exe",
-    L"douyin_game_widget.exe"
+    L"douyin_game_widget.exe",
+    L"douyin_guard.exe",
+    L"parfait_crash_handler.exe"
 };
 
 static bool IsProcessBlocked(LPCWSTR appName, LPCWSTR cmdLine) {
@@ -303,32 +313,44 @@ static void ForEachRelatedProcess(Fn&& fn) {
     CloseHandle(hSnapshot);
 }
 
-static void TrimAllRelatedProcesses() {
-    ForEachRelatedProcess([](const PROCESSENTRY32W& pe) {
+// 硬上限：内核持续按 LRU 挤冷页、保留热页。douyin 子进程出厂配额 max 仅约 1.4MB，
+// 小于目标值，故不能拿配额 max 做幂等判断，须比对实际工作集并无条件重设
+static void ClampProcessWorkingSet(HANDLE hProc, SIZE_T maxBytes) {
+    PROCESS_MEMORY_COUNTERS pmc = { sizeof(pmc) };
+    if (!GetProcessMemoryInfo(hProc, &pmc, sizeof(pmc))) return;
+    if (pmc.WorkingSetSize <= maxBytes) return;
+
+    SIZE_T minWs = 0, maxWs = 0;
+    if (!GetProcessWorkingSetSize(hProc, &minWs, &maxWs) || maxWs == maxBytes) return;
+    SetProcessWorkingSetSizeEx(hProc, minWs, maxBytes, QUOTA_LIMITS_HARDWS_MAX_ENABLE);
+}
+
+static void ApplyTrimToRelatedProcesses() {
+    SIZE_T maxBytes = g_cfg.trimTargetMb * 1024 * 1024;
+    ForEachRelatedProcess([&](const PROCESSENTRY32W& pe) {
         HANDLE hProc = OpenProcess(PROCESS_SET_QUOTA | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
         if (hProc) {
-            EmptyWorkingSet(hProc);
+            ClampProcessWorkingSet(hProc, maxBytes);
             CloseHandle(hProc);
         }
         return true;
     });
 
-    EmptyWorkingSet(GetCurrentProcess());
+    ClampProcessWorkingSet(GetCurrentProcess(), maxBytes);
 }
 
 void WorkingSetTrimWorker() {
-    std::this_thread::sleep_for(std::chrono::seconds(6));
-    TrimAllRelatedProcesses();
+    // 启动即压工作集会令渲染进程预热缺页
+    std::this_thread::sleep_for(std::chrono::seconds(5));
+    ApplyTrimToRelatedProcesses();
 
-    auto lastFullTrim = std::chrono::steady_clock::now();
+    auto lastTrim = std::chrono::steady_clock::now();
 
     while (true) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+        std::this_thread::sleep_for(std::chrono::seconds(2));
 
         auto now = std::chrono::steady_clock::now();
-        auto elapsedSec = std::chrono::duration_cast<std::chrono::seconds>(now - lastFullTrim).count();
-
-        if (elapsedSec < g_cfg.cooldownSec) {
+        if (std::chrono::duration_cast<std::chrono::seconds>(now - lastTrim).count() < g_cfg.cooldownSec) {
             continue;
         }
 
@@ -337,8 +359,8 @@ void WorkingSetTrimWorker() {
         ForEachRelatedProcess([&](const PROCESSENTRY32W& pe) {
             HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
             if (hProc) {
-                PROCESS_MEMORY_COUNTERS_EX pmc = { 0 };
-                if (GetProcessMemoryInfo(hProc, (PROCESS_MEMORY_COUNTERS*)&pmc, sizeof(pmc))) {
+                PROCESS_MEMORY_COUNTERS pmc = { sizeof(pmc) };
+                if (GetProcessMemoryInfo(hProc, &pmc, sizeof(pmc))) {
                     totalTreeWorkingSet += pmc.WorkingSetSize;
                     if (pmc.WorkingSetSize > g_cfg.singleThresholdMb * 1024 * 1024) {
                         singleProcExceed = true;
@@ -349,9 +371,9 @@ void WorkingSetTrimWorker() {
             return !singleProcExceed;
         });
 
-        if (totalTreeWorkingSet > g_cfg.totalThresholdMb * 1024 * 1024 || singleProcExceed || elapsedSec >= g_cfg.fullTrimSec) {
-            TrimAllRelatedProcesses();
-            lastFullTrim = now;
+        if (totalTreeWorkingSet > g_cfg.totalThresholdMb * 1024 * 1024 || singleProcExceed) {
+            ApplyTrimToRelatedProcesses();
+            lastTrim = now;
         }
     }
 }
